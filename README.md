@@ -18,15 +18,17 @@ bash /path/to/agents-bootstrap.sh
 bash agents-bootstrap.sh /path/to/your/vault
 ```
 
-The script walks you through 7 decision categories:
+The script walks you through 7 sections with an interactive wizard:
 
-1. **Vault Identity** — name, description, type (PKM, learning, professional, creative)
+1. **Vault Identity** — name, description
 2. **Vault Structure** — folder layout, index conventions
 3. **Conventions** — link style (wiki vs markdown), frontmatter schema, templates
-4. **Safety Boundaries** — protected paths, private folders, confirmation requirements
+4. **Safety Boundaries** — protected paths, private folders
 5. **Personas** — which agent roles to enable
 6. **Commands** — which workflows to generate
 7. **Hooks** — pre/post action checklists
+
+Personas, commands, and hooks use an interactive checkbox selector (arrow keys, space to toggle, `a`/`n` for all/none). Type `<` at any text prompt or press left arrow in checkboxes to go back a step.
 
 Then it generates your complete `.agents/` system. Non-destructive (never overwrites existing files), idempotent (safe to run multiple times).
 
@@ -57,7 +59,12 @@ your-vault/
     │   ├── research-to-note.md
     │   └── daily-standup.md
     ├── context/               # Domain knowledge, vault structure ref
-    └── hooks/                 # Pre/post action checklists
+    ├── hooks/                 # Pre/post action checklists
+    │   ├── pre-create.md
+    │   ├── pre-edit.md
+    │   ├── post-create.md
+    │   └── vault-health.md
+    └── README.md
 ```
 
 ## Built-in Personas
@@ -102,8 +109,8 @@ The framework documentation (`AGENTS Framework.md`) covers additional modules:
 
 ## Requirements
 
-- Bash shell
-- `cat`, `mkdir` (standard Unix utilities)
+- Bash shell (3.2+)
+- Standard Unix utilities (`mkdir`, `dirname`, `tput`)
 - That's it. No external dependencies.
 
 ## License
