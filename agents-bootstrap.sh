@@ -41,29 +41,37 @@ safe_write() {
   fi
 }
 
-# Prompt with default
+# Prompt with default (uses existing value on re-entry, < goes back)
 ask() {
   local prompt="$1" default="$2" var_name="$3"
+  local _prev=""
+  eval "_prev=\"\${$var_name:-}\""
+  if [[ -n "$_prev" ]]; then default="$_prev"; fi
   echo -en "${CYAN}${prompt}${RESET}"
   if [[ -n "$default" ]]; then
     echo -en " ${DIM}[${default}]${RESET}"
   fi
   echo -n ": "
   read -r input
-  eval "$var_name=\"${input:-$default}\""
+  if [[ "$input" == "<" ]]; then _GO_BACK=1; return; fi
+  printf -v "$var_name" '%s' "${input:-$default}"
 }
 
-# Yes/no prompt
+# Yes/no prompt (uses existing value on re-entry, < goes back)
 ask_yn() {
   local prompt="$1" default="$2" var_name="$3"
+  local _prev=""
+  eval "_prev=\"\${$var_name:-}\""
+  if [[ -n "$_prev" ]]; then default="$_prev"; fi
   local hint="[Y/n]"
-  [[ "$default" == "n" ]] && hint="[y/N]"
+  if [[ "$default" == "n" ]]; then hint="[y/N]"; fi
   echo -en "${CYAN}${prompt}${RESET} ${DIM}${hint}${RESET}: "
   read -r input
+  if [[ "$input" == "<" ]]; then _GO_BACK=1; return; fi
   input="${input:-$default}"
   case "$input" in
-    [yY]*) eval "$var_name=y" ;;
-    *) eval "$var_name=n" ;;
+    [yY]*) printf -v "$var_name" '%s' "y" ;;
+    *) printf -v "$var_name" '%s' "n" ;;
   esac
 }
 
@@ -75,96 +83,318 @@ ask_multi() {
   echo -en "Select (comma-separated, or 'all'): "
   read -r input
   if [[ "$input" == "all" ]]; then
-    eval "$var_name=\"$options\""
+    printf -v "$var_name" '%s' "$options"
   else
-    eval "$var_name=\"$input\""
+    printf -v "$var_name" '%s' "$input"
   fi
 }
 
+# Interactive checkbox selector
+# Usage: ask_checkbox "prompt" RESULT_VAR "key1:Description" "key2:Description" ...
+# Returns comma-separated selected keys in RESULT_VAR (empty string if none).
+ask_checkbox() {
+  local prompt="$1" var_name="$2"
+  shift 2
+  local items=("$@")
+  local count=${#items[@]}
+  local keys=() descs=()
+  local cursor=0 i
+
+  for item in "${items[@]}"; do
+    keys+=("${item%%:*}")
+    descs+=("${item#*:}")
+  done
+
+  local selected=()
+  for ((i=0; i<count; i++)); do selected[$i]=0; done
+
+  # Pre-select from existing value on re-entry
+  local _prev=""
+  eval "_prev=\"\${$var_name:-}\""
+  if [[ -n "$_prev" ]]; then
+    local _prev_items
+    IFS=',' read -ra _prev_items <<< "$_prev"
+    local _p
+    for ((i=0; i<count; i++)); do
+      for _p in "${_prev_items[@]}"; do
+        _p="$(echo "$_p" | xargs)"
+        if [[ "$_p" == "${keys[$i]}" ]]; then selected[$i]=1; fi
+      done
+    done
+  fi
+
+  # Non-interactive fallback
+  if [[ ! -t 0 ]]; then
+    local all_keys
+    all_keys="$(IFS=,; echo "${keys[*]}")"
+    echo -e "${CYAN}${prompt}${RESET}"
+    echo -e "${DIM}Options: ${all_keys}${RESET}"
+    echo -n "Select (comma-separated, or 'all'): "
+    read -r input
+    if [[ "$input" == "all" ]]; then input="$all_keys"; fi
+    printf -v "$var_name" '%s' "$input"
+    return
+  fi
+
+  # Pad key names for alignment
+  local max_len=0
+  for k in "${keys[@]}"; do
+    if [[ ${#k} -gt $max_len ]]; then max_len=${#k}; fi
+  done
+
+  # Hide cursor during interaction
+  tput civis 2>/dev/null || true
+
+  echo -e "${CYAN}${prompt}${RESET}"
+  echo -e "${DIM}  ↑/↓ navigate · space toggle · a all · n none · ← back · enter confirm${RESET}"
+
+  # Initial draw
+  for ((i=0; i<count; i++)); do
+    local mark=" " padded
+    if [[ ${selected[$i]} -eq 1 ]]; then mark="x"; fi
+    printf -v padded "%-${max_len}s" "${keys[$i]}"
+    if [[ $i -eq $cursor ]]; then
+      echo -e "  ${BOLD}> [${mark}] ${padded}  ${descs[$i]}${RESET}"
+    else
+      echo -e "    [${mark}] ${padded}  ${DIM}${descs[$i]}${RESET}"
+    fi
+  done
+
+  while true; do
+    local key=""
+    IFS= read -rsn1 key
+    case "$key" in
+      $'\x1b')
+        local seq=""
+        read -rsn2 seq
+        case "$seq" in
+          '[A') if [[ $cursor -gt 0 ]]; then cursor=$((cursor - 1)); fi ;;
+          '[B') if [[ $cursor -lt $((count - 1)) ]]; then cursor=$((cursor + 1)); fi ;;
+          '[D') _GO_BACK=1; break ;;  # left arrow = back
+        esac ;;
+      ' ') selected[$cursor]=$(( 1 - ${selected[$cursor]} )) ;;
+      a|A) for ((i=0; i<count; i++)); do selected[$i]=1; done ;;
+      n|N) for ((i=0; i<count; i++)); do selected[$i]=0; done ;;
+      '') break ;;
+    esac
+    # Redraw: move cursor up count lines, clearing each
+    for ((i=0; i<count; i++)); do echo -en "\033[A\033[2K"; done
+    for ((i=0; i<count; i++)); do
+      local mark=" " padded
+      if [[ ${selected[$i]} -eq 1 ]]; then mark="x"; fi
+      printf -v padded "%-${max_len}s" "${keys[$i]}"
+      if [[ $i -eq $cursor ]]; then
+        echo -e "  ${BOLD}> [${mark}] ${padded}  ${descs[$i]}${RESET}"
+      else
+        echo -e "    [${mark}] ${padded}  ${DIM}${descs[$i]}${RESET}"
+      fi
+    done
+  done
+
+  tput cnorm 2>/dev/null || true
+
+  # If going back, don't update the variable
+  if [[ ${_GO_BACK:-0} -eq 1 ]]; then return; fi
+
+  # Build comma-separated result
+  local result=""
+  for ((i=0; i<count; i++)); do
+    if [[ ${selected[$i]} -eq 1 ]]; then
+      if [[ -n "$result" ]]; then result+=","; fi
+      result+="${keys[$i]}"
+    fi
+  done
+
+  # Print selection summary
+  if [[ -n "$result" ]]; then
+    echo -e "${DIM}Selected: ${result}${RESET}"
+  else
+    echo -e "${DIM}(none selected)${RESET}"
+  fi
+
+  printf -v "$var_name" '%s' "$result"
+}
+
+# Section header for a given step number
+_show_header() {
+  case $1 in
+    1|2)
+      echo -e "\n${BOLD}1. VAULT IDENTITY${RESET}"
+      echo -e "${DIM}These become the header of your root AGENTS.md — the first thing any LLM${RESET}"
+      echo -e "${DIM}reads when it opens your vault. A clear name and description help the agent${RESET}"
+      echo -e "${DIM}understand what this vault is for and set the right tone.${RESET}" ;;
+    3|4|5)
+      echo -e "\n${BOLD}2. VAULT STRUCTURE${RESET}"
+      echo -e "${DIM}Your folder layout becomes the agent's mental map of where things go.${RESET}"
+      echo -e "${DIM}List the top-level folders where content lives. Index/hub notes are optional${RESET}"
+      echo -e "${DIM}navigation files (e.g. '00 - Index.md') that link to everything in a folder.${RESET}" ;;
+    6)
+      echo -e "\n${BOLD}3. CONVENTIONS${RESET}"
+      echo -e "${DIM}These rules ensure the agent writes notes that look and feel like yours.${RESET}"
+      echo -e "${DIM}Consistent linking, frontmatter, and templates prevent cleanup work later.${RESET}" ;;
+    7|8|9)
+      echo -e "\n${DIM}Frontmatter is the YAML metadata block at the top of each note (between --- markers).${RESET}"
+      echo -e "${DIM}It gives agents structured info about each note — category, tags, dates, status —${RESET}"
+      echo -e "${DIM}so they can organize, filter, and validate without reading the full content.${RESET}" ;;
+    10|11|12)
+      echo -e "\n${DIM}Templates are starter files the agent uses when creating new notes. Each template${RESET}"
+      echo -e "${DIM}pre-fills frontmatter and section headings for a specific note type, so the agent${RESET}"
+      echo -e "${DIM}produces consistent structure without you having to specify it every time.${RESET}" ;;
+    13|14)
+      echo -e "\n${BOLD}4. SAFETY BOUNDARIES${RESET}"
+      echo -e "${DIM}Protected paths are off-limits — the agent will never modify them.${RESET}"
+      echo -e "${DIM}Private folders won't be referenced in notes or shared content.${RESET}" ;;
+    15|16)
+      echo -e "\n${BOLD}5. PERSONAS${RESET}"
+      echo -e "${DIM}Personas are distinct agent roles you activate by saying 'act as the [persona]'.${RESET}"
+      echo -e "${DIM}Each one has its own expertise, tone, and rules. Pick what fits your workflow —${RESET}"
+      echo -e "${DIM}you can always add more later by creating files in .agents/personas/.${RESET}" ;;
+    17)
+      echo -e "\n${BOLD}6. COMMANDS${RESET}"
+      echo -e "${DIM}Commands are reusable step-by-step workflows the agent follows when you invoke${RESET}"
+      echo -e "${DIM}them by name (e.g. 'run create-note'). They chain together rules, hooks, and${RESET}"
+      echo -e "${DIM}personas into repeatable processes.${RESET}" ;;
+    18)
+      echo -e "\n${BOLD}7. HOOKS${RESET}"
+      echo -e "${DIM}Hooks are quality checklists the agent runs before or after actions — like${RESET}"
+      echo -e "${DIM}verifying frontmatter before creating a note, or checking links afterward.${RESET}"
+      echo -e "${DIM}They catch mistakes before they compound.${RESET}" ;;
+  esac
+}
+
+# Map step to section group (for header display)
+_section_of() {
+  case $1 in
+    1|2) echo 1 ;; 3|4|5) echo 2 ;; 6) echo 3 ;; 7|8|9) echo 4 ;;
+    10|11|12) echo 5 ;; 13|14) echo 6 ;; 15|16) echo 7 ;;
+    17) echo 8 ;; 18) echo 9 ;;
+  esac
+}
+
 # ============================================================================
+# MAIN WIZARD LOOP — one step per prompt, < to go back
+# ============================================================================
+#
+# Steps:
+#  1  Vault name                          (always)
+#  2  Vault description                   (always)
+#  3  Content folders                     (always)
+#  4  Index hub notes? y/n                (always)
+#  5  Index file name                     (if HAS_INDEXES=y)
+#  6  Link style 1/2/3                    (always)
+#  7  Use frontmatter? y/n               (always)
+#  8  Required frontmatter fields         (if USE_FRONTMATTER=y)
+#  9  Optional frontmatter fields         (if USE_FRONTMATTER=y)
+# 10  Use templates? y/n                  (always)
+# 11  Template folder path                (if USE_TEMPLATES=y)
+# 12  Template names                      (if USE_TEMPLATES=y)
+# 13  Protected paths                     (always)
+# 14  Private folders                     (always)
+# 15  Personas checkbox                   (always)
+# 16  Domain specialist areas             (if domain-specialist selected)
+# 17  Commands checkbox                   (always)
+# 18  Hooks checkbox                      (always)
+
 echo -e "${BOLD}AGENTS Bootstrap${RESET}"
 echo -e "${DIM}Generating an LLM-agnostic .agents/ system for your Obsidian vault.${RESET}"
 echo -e "${DIM}Vault directory: ${VAULT_DIR}${RESET}"
-echo ""
+echo -e "${DIM}Type < at any prompt to go back.${RESET}"
 
-# --- 1. Vault Identity ---
-echo -e "${BOLD}1. VAULT IDENTITY${RESET}"
-ask "Vault name" "my-vault" VAULT_NAME
-ask "Brief vault description (one sentence)" "An Obsidian knowledge vault" VAULT_DESC
-echo ""
+_GO_BACK=0
+_step=1
+_dir=1        # 1=forward, -1=backward
+_prev_sec=0
 
-# --- 2. Vault Structure ---
-echo -e "${BOLD}2. VAULT STRUCTURE${RESET}"
-ask "Content folders (comma-separated)" "Notes,Projects,Reference,Archive" FOLDERS_RAW
-IFS=',' read -ra FOLDERS <<< "$FOLDERS_RAW"
-# Trim whitespace
-for i in "${!FOLDERS[@]}"; do FOLDERS[$i]="$(echo "${FOLDERS[$i]}" | xargs)"; done
+while [[ $_step -ge 1 && $_step -le 18 ]]; do
+  _GO_BACK=0
+  _skip=0
 
-ask_yn "Do your folders have index/hub notes?" "y" HAS_INDEXES
-if [[ "$HAS_INDEXES" == "y" ]]; then
-  ask "Index file name convention" "00 - Index.md" INDEX_NAME
-else
-  INDEX_NAME=""
-fi
-echo ""
-
-# --- 3. Conventions ---
-echo -e "${BOLD}3. CONVENTIONS${RESET}"
-echo -e "${DIM}Link style:${RESET}"
-echo "  1) Wiki links only [[Note Name]]"
-echo "  2) Markdown links only [text](path)"
-echo "  3) Mixed / no preference"
-echo -n "Choose (1/2/3): "
-read -r LINK_STYLE
-LINK_STYLE="${LINK_STYLE:-1}"
-
-ask_yn "Use YAML frontmatter?" "y" USE_FRONTMATTER
-if [[ "$USE_FRONTMATTER" == "y" ]]; then
-  ask "Required frontmatter fields (comma-separated)" "created,category,tags" FM_FIELDS_RAW
-  ask "Optional frontmatter fields (comma-separated, or none)" "status,type" FM_OPT_RAW
-fi
-
-ask_yn "Use note templates?" "y" USE_TEMPLATES
-if [[ "$USE_TEMPLATES" == "y" ]]; then
-  ask "Template folder path" "_templates" TEMPLATE_DIR
-  ask "Template names (comma-separated)" "Daily,Project,Reference" TEMPLATES_RAW
-fi
-echo ""
-
-# --- 4. Safety ---
-echo -e "${BOLD}4. SAFETY BOUNDARIES${RESET}"
-ask "Protected paths (comma-separated, .obsidian/ is always included)" ".obsidian/" PROTECTED_RAW
-ask "Private/gitignored folders (comma-separated, or none)" "none" PRIVATE_RAW
-echo ""
-
-# --- 5. Personas ---
-echo -e "${BOLD}5. PERSONAS${RESET}"
-ask_multi "Which personas do you want?" "writer,researcher,librarian,domain-specialist,executive-assistant,auditor,boundary-pusher,life-coach" PERSONAS_RAW
-IFS=',' read -ra PERSONAS <<< "$PERSONAS_RAW"
-for i in "${!PERSONAS[@]}"; do PERSONAS[$i]="$(echo "${PERSONAS[$i]}" | xargs)"; done
-
-# Domain specialist domains
-DOMAINS_RAW=""
-for p in "${PERSONAS[@]}"; do
-  if [[ "$p" == "domain-specialist" ]]; then
-    ask "Domain specialist areas (comma-separated)" "General" DOMAINS_RAW
+  # Show section header when entering a new section group
+  _cur_sec=$(_section_of $_step)
+  if [[ $_cur_sec -ne $_prev_sec ]]; then
+    _show_header $_step
+    _prev_sec=$_cur_sec
   fi
+
+  case $_step in
+    1)  ask "Vault name" "my-vault" VAULT_NAME ;;
+    2)  ask "Brief vault description (one sentence)" "An Obsidian knowledge vault" VAULT_DESC ;;
+    3)  ask "Content folders (comma-separated)" "Notes,Projects,Reference,Archive" FOLDERS_RAW ;;
+    4)  ask_yn "Should your folders have index/hub notes?" "y" HAS_INDEXES ;;
+    5)  if [[ "${HAS_INDEXES:-n}" != "y" ]]; then INDEX_NAME=""; _skip=1
+        else ask "Index file name convention" "00 - Index.md" INDEX_NAME; fi ;;
+    6)  echo -e "${DIM}Link style:${RESET}"
+        echo "  1) Wiki links only [[Note Name]]"
+        echo "  2) Markdown links only [text](path)"
+        echo "  3) Mixed / no preference"
+        echo -en "Choose (1/2/3) ${DIM}[${LINK_STYLE:-1}]${RESET}: "
+        read -r _ls_input
+        if [[ "$_ls_input" == "<" ]]; then _GO_BACK=1
+        else LINK_STYLE="${_ls_input:-${LINK_STYLE:-1}}"; fi ;;
+    7)  ask_yn "Use YAML frontmatter?" "y" USE_FRONTMATTER ;;
+    8)  if [[ "${USE_FRONTMATTER:-n}" != "y" ]]; then _skip=1
+        else echo -e "${DIM}Required fields must be present on every note. Optional fields are used when relevant.${RESET}"
+             ask "Required frontmatter fields (comma-separated)" "created,category,tags" FM_FIELDS_RAW; fi ;;
+    9)  if [[ "${USE_FRONTMATTER:-n}" != "y" ]]; then _skip=1
+        else ask "Optional frontmatter fields (comma-separated, or none)" "status,type" FM_OPT_RAW; fi ;;
+    10) ask_yn "Use note templates?" "y" USE_TEMPLATES ;;
+    11) if [[ "${USE_TEMPLATES:-n}" != "y" ]]; then _skip=1
+        else ask "Template folder path" "_templates" TEMPLATE_DIR; fi ;;
+    12) if [[ "${USE_TEMPLATES:-n}" != "y" ]]; then _skip=1
+        else ask "Template names (comma-separated)" "Daily,Project,Reference" TEMPLATES_RAW; fi ;;
+    13) ask "Protected paths (comma-separated, .obsidian/ is always included)" ".obsidian/" PROTECTED_RAW ;;
+    14) ask "Private/gitignored folders (comma-separated, or none)" "none" PRIVATE_RAW ;;
+    15) ask_checkbox "Which personas do you want?" PERSONAS_RAW \
+          "writer:Draft, refine, edit content" \
+          "researcher:Web research → sourced notes" \
+          "librarian:Vault health, links, indexes" \
+          "domain-specialist:Per-domain expertise" \
+          "executive-assistant:Tasks, standups, projects" \
+          "auditor:Fact-checking, consistency" \
+          "boundary-pusher:Cross-domain connections" \
+          "life-coach:Goals, accountability" ;;
+    16) if [[ "${PERSONAS_RAW:-}" != *"domain-specialist"* ]]; then _skip=1
+        else ask "Domain specialist areas (comma-separated)" "General" DOMAINS_RAW; fi ;;
+    17) ask_checkbox "Which commands do you want?" COMMANDS_RAW \
+          "create-note:End-to-end note creation workflow" \
+          "review-vault:Comprehensive vault health audit" \
+          "organize:Batch cleanup and reorganization" \
+          "research-to-note:Web research → vault note pipeline" \
+          "daily-standup:Morning check-in and task carry-forward" ;;
+    18) ask_checkbox "Which hooks do you want?" HOOKS_RAW \
+          "pre-create:Check naming, frontmatter, placement before creating" \
+          "pre-edit:Preserve links and metadata before modifying" \
+          "post-create:Verify path, frontmatter, links after creating" \
+          "vault-health:Periodic integrity and consistency checks" ;;
+  esac
+
+  # Navigate: back, skip, or forward
+  if [[ $_GO_BACK -eq 1 ]]; then
+    _dir=-1
+    _step=$((_step + _dir))
+  elif [[ $_skip -eq 1 ]]; then
+    _step=$((_step + _dir))
+  else
+    _dir=1
+    _step=$((_step + 1))
+  fi
+
+  if [[ $_step -lt 1 ]]; then _step=1; fi
 done
 echo ""
 
-# --- 6. Commands ---
-echo -e "${BOLD}6. COMMANDS${RESET}"
-ask_multi "Which commands do you want?" "create-note,review-vault,organize,research-to-note,daily-standup" COMMANDS_RAW
-IFS=',' read -ra COMMANDS <<< "$COMMANDS_RAW"
-for i in "${!COMMANDS[@]}"; do COMMANDS[$i]="$(echo "${COMMANDS[$i]}" | xargs)"; done
-echo ""
+# Post-process arrays for file generation
+IFS=',' read -ra FOLDERS <<< "${FOLDERS_RAW:-}"
+for i in "${!FOLDERS[@]}"; do FOLDERS[$i]="$(echo "${FOLDERS[$i]}" | xargs)"; done
 
-# --- 7. Hooks ---
-echo -e "${BOLD}7. HOOKS${RESET}"
-ask_multi "Which hooks do you want?" "pre-create,pre-edit,post-create,vault-health" HOOKS_RAW
-IFS=',' read -ra HOOKS <<< "$HOOKS_RAW"
+IFS=',' read -ra PERSONAS <<< "${PERSONAS_RAW:-}"
+for i in "${!PERSONAS[@]}"; do PERSONAS[$i]="$(echo "${PERSONAS[$i]}" | xargs)"; done
+
+IFS=',' read -ra COMMANDS <<< "${COMMANDS_RAW:-}"
+for i in "${!COMMANDS[@]}"; do COMMANDS[$i]="$(echo "${COMMANDS[$i]}" | xargs)"; done
+
+IFS=',' read -ra HOOKS <<< "${HOOKS_RAW:-}"
 for i in "${!HOOKS[@]}"; do HOOKS[$i]="$(echo "${HOOKS[$i]}" | xargs)"; done
-echo ""
 
 # ============================================================================
 # GENERATE FILES
