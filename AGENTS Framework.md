@@ -11,7 +11,7 @@ A reusable framework for setting up LLM-agnostic agent configuration in any Obsi
 
 ## What This Is
 
-**AGENTS.md** is an open standard for guiding AI coding agents. It's supported by 60k+ projects and tools including Claude Code, OpenAI Codex, Cursor, Gemini CLI, Zed Agent, GitHub Copilot, Aider, and more. See [[https://agents.md]] for the official spec.
+**AGENTS.md** is an open standard for guiding AI coding agents. It's supported by 60k+ projects and tools including Claude Code, OpenAI Codex, Cursor, Gemini CLI, Zed Agent, GitHub Copilot, Aider, and more. See [agents.md](https://agents.md) for the official spec.
 
 This framework extends the standard with a **`.agents/` directory** that adds:
 - **Rules** — hard constraints every agent must follow

@@ -36,7 +36,7 @@ safe_write() {
   if [[ -f "$path" ]]; then
     skipped_files+=("$path")
   else
-    echo "$content" > "$path"
+    printf '%s\n' "$content" > "$path"
     created_files+=("$path")
   fi
 }
@@ -73,20 +73,6 @@ ask_yn() {
     [yY]*) printf -v "$var_name" '%s' "y" ;;
     *) printf -v "$var_name" '%s' "n" ;;
   esac
-}
-
-# Multi-select from options
-ask_multi() {
-  local prompt="$1" options="$2" var_name="$3"
-  echo -e "${CYAN}${prompt}${RESET}"
-  echo -e "${DIM}Options: ${options}${RESET}"
-  echo -en "Select (comma-separated, or 'all'): "
-  read -r input
-  if [[ "$input" == "all" ]]; then
-    printf -v "$var_name" '%s' "$options"
-  else
-    printf -v "$var_name" '%s' "$input"
-  fi
 }
 
 # Interactive checkbox selector
@@ -142,8 +128,9 @@ ask_checkbox() {
     if [[ ${#k} -gt $max_len ]]; then max_len=${#k}; fi
   done
 
-  # Hide cursor during interaction
+  # Hide cursor during interaction; restore on exit/interrupt
   tput civis 2>/dev/null || true
+  trap 'tput cnorm 2>/dev/null' EXIT INT TERM
 
   echo -e "${CYAN}${prompt}${RESET}"
   echo -e "${DIM}  ↑/↓ navigate · space toggle · a all · n none · ← back · enter confirm${RESET}"
@@ -192,6 +179,7 @@ ask_checkbox() {
   done
 
   tput cnorm 2>/dev/null || true
+  trap - EXIT INT TERM
 
   # If going back, don't update the variable
   if [[ ${_GO_BACK:-0} -eq 1 ]]; then return; fi
@@ -308,6 +296,7 @@ _prev_sec=0
 while [[ $_step -ge 1 && $_step -le 18 ]]; do
   _GO_BACK=0
   _skip=0
+  _retry=0
 
   # Show section header when entering a new section group
   _cur_sec=$(_section_of $_step)
@@ -330,7 +319,9 @@ while [[ $_step -ge 1 && $_step -le 18 ]]; do
         echo -en "Choose (1/2/3) ${DIM}[${LINK_STYLE:-1}]${RESET}: "
         read -r _ls_input
         if [[ "$_ls_input" == "<" ]]; then _GO_BACK=1
-        else LINK_STYLE="${_ls_input:-${LINK_STYLE:-1}}"; fi ;;
+        elif [[ -z "$_ls_input" ]]; then LINK_STYLE="${LINK_STYLE:-1}"
+        elif [[ "$_ls_input" =~ ^[123]$ ]]; then LINK_STYLE="$_ls_input"
+        else echo -e "${YELLOW}Invalid choice — enter 1, 2, or 3${RESET}"; _retry=1; fi ;;
     7)  ask_yn "Use YAML frontmatter?" "y" USE_FRONTMATTER ;;
     8)  if [[ "${USE_FRONTMATTER:-n}" != "y" ]]; then _skip=1
         else echo -e "${DIM}Required fields must be present on every note. Optional fields are used when relevant.${RESET}"
@@ -368,8 +359,10 @@ while [[ $_step -ge 1 && $_step -le 18 ]]; do
           "vault-health:Periodic integrity and consistency checks" ;;
   esac
 
-  # Navigate: back, skip, or forward
-  if [[ $_GO_BACK -eq 1 ]]; then
+  # Navigate: retry, back, skip, or forward
+  if [[ $_retry -eq 1 ]]; then
+    : # stay on current step
+  elif [[ $_GO_BACK -eq 1 ]]; then
     _dir=-1
     _step=$((_step + _dir))
   elif [[ $_skip -eq 1 ]]; then
@@ -383,18 +376,34 @@ while [[ $_step -ge 1 && $_step -le 18 ]]; do
 done
 echo ""
 
-# Post-process arrays for file generation
-IFS=',' read -ra FOLDERS <<< "${FOLDERS_RAW:-}"
-for i in "${!FOLDERS[@]}"; do FOLDERS[$i]="$(echo "${FOLDERS[$i]}" | xargs)"; done
+# Post-process arrays for file generation (guard empty strings to produce empty arrays)
+if [[ -n "${FOLDERS_RAW:-}" ]]; then
+  IFS=',' read -ra FOLDERS <<< "$FOLDERS_RAW"
+  for i in "${!FOLDERS[@]}"; do FOLDERS[$i]="$(echo "${FOLDERS[$i]}" | xargs)"; done
+else
+  FOLDERS=()
+fi
 
-IFS=',' read -ra PERSONAS <<< "${PERSONAS_RAW:-}"
-for i in "${!PERSONAS[@]}"; do PERSONAS[$i]="$(echo "${PERSONAS[$i]}" | xargs)"; done
+if [[ -n "${PERSONAS_RAW:-}" ]]; then
+  IFS=',' read -ra PERSONAS <<< "$PERSONAS_RAW"
+  for i in "${!PERSONAS[@]}"; do PERSONAS[$i]="$(echo "${PERSONAS[$i]}" | xargs)"; done
+else
+  PERSONAS=()
+fi
 
-IFS=',' read -ra COMMANDS <<< "${COMMANDS_RAW:-}"
-for i in "${!COMMANDS[@]}"; do COMMANDS[$i]="$(echo "${COMMANDS[$i]}" | xargs)"; done
+if [[ -n "${COMMANDS_RAW:-}" ]]; then
+  IFS=',' read -ra COMMANDS <<< "$COMMANDS_RAW"
+  for i in "${!COMMANDS[@]}"; do COMMANDS[$i]="$(echo "${COMMANDS[$i]}" | xargs)"; done
+else
+  COMMANDS=()
+fi
 
-IFS=',' read -ra HOOKS <<< "${HOOKS_RAW:-}"
-for i in "${!HOOKS[@]}"; do HOOKS[$i]="$(echo "${HOOKS[$i]}" | xargs)"; done
+if [[ -n "${HOOKS_RAW:-}" ]]; then
+  IFS=',' read -ra HOOKS <<< "$HOOKS_RAW"
+  for i in "${!HOOKS[@]}"; do HOOKS[$i]="$(echo "${HOOKS[$i]}" | xargs)"; done
+else
+  HOOKS=()
+fi
 
 # ============================================================================
 # GENERATE FILES
@@ -467,8 +476,14 @@ fi
 
 INDEX_SECTION_BRIEF=""
 if [[ -n "$INDEX_NAME" ]]; then
-  INDEX_SECTION_BRIEF="Each section has a \`${INDEX_NAME}\` hub linking to its contents."
+  INDEX_SECTION_BRIEF="Each section has a \`${INDEX_NAME}\` hub linking to its contents.
+
+"
 fi
+
+# Normalize frontmatter fields display (ensure spaces after commas)
+FM_FIELDS_DISPLAY="${FM_FIELDS_RAW:-created, category, tags}"
+FM_FIELDS_DISPLAY="$(echo "$FM_FIELDS_DISPLAY" | sed 's/,\([^ ]\)/, \1/g')"
 
 # === ROOT AGENTS.md ===
 safe_write "$VAULT_DIR/AGENTS.md" "# ${VAULT_NAME} — Agent Instructions
@@ -478,7 +493,7 @@ ${VAULT_DESC}. Be conversational — explain your reasoning, ask follow-ups, and
 ## Critical Rules
 
 - ${LINK_RULE}
-- Every note needs YAML frontmatter: ${FM_FIELDS_RAW:-created, category, tags}
+- Every note needs YAML frontmatter: ${FM_FIELDS_DISPLAY}
 - Note naming: clean descriptive titles, no numbered prefixes
 - NEVER modify \`.obsidian/\`
 
